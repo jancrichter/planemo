@@ -17,7 +17,6 @@ from allure_commons.types import (
     LinkType,
 )
 from allure_commons.utils import (
-    escape_non_unicode_symbols,
     md5,
     platform_label,
     uuid4,
@@ -52,7 +51,6 @@ class AllureWriter:
         plugin_manager.unregister(plugin=self.logger)
 
     def process_test_case(self, test_case, file_modication_datetime=None):
-
         with self.lifecycle.schedule_test_case() as test_result:
             test_index = test_case["id"]
             test_data = test_case.get("data") or {}
@@ -118,9 +116,7 @@ class AllureWriter:
             self._record_tool_link(test_result, tool_id)
             self._record_status(test_result, test_data)
             if test_result.status in [Status.BROKEN, Status.FAILED]:
-                test_result.statusDetails = StatusDetails(
-                    message=escape_non_unicode_symbols(problem_message or "Unknown problem"), trace=None
-                )
+                test_result.statusDetails = StatusDetails(message=(problem_message or "Unknown problem"), trace=None)
 
         self.lifecycle.write_test_case()
 

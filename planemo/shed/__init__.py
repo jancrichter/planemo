@@ -14,6 +14,7 @@ from typing import NamedTuple
 
 import bioblend
 import yaml
+from bioblend.toolshed import ToolShedInstance
 from galaxy.util import (
     odict,
     unicodify,
@@ -24,7 +25,6 @@ from planemo import (
     glob,
     templates,
 )
-from planemo.bioblend import toolshed
 from planemo.io import (
     can_write_to_path,
     coalesce_return_codes,
@@ -177,7 +177,7 @@ yaml.SafeLoader.add_constructor("tag:yaml.org,2002:str", construct_yaml_str)
 
 
 class ShedContext(NamedTuple):
-    tsi: toolshed.ToolShedInstance
+    tsi: ToolShedInstance
     shed_config: dict
     config_owner: str
 
@@ -233,9 +233,23 @@ def install_arg_lists(ctx, paths, **kwds):
         install_args_list.append(realized_repository.install_args(ctx, shed_context))
         return 0
 
-    exit_code = for_each_repository(ctx, process_repo, paths, **kwds)
-    if exit_code:
-        raise RuntimeError(PROBLEM_PROCESSING_REPOSITORY_MESSAGE)
+    if not kwds.get("name"):
+        exit_code = for_each_repository(ctx, process_repo, paths, **kwds)
+        if exit_code:
+            raise RuntimeError(PROBLEM_PROCESSING_REPOSITORY_MESSAGE)
+    else:
+        # Can only provide a single tool shed artifact to test
+        name = kwds["name"]
+        owner = kwds["owner"]
+        changeset_revision = shed_context.tsi.repositories.get_ordered_installable_revisions(owner=owner, name=name)[-1]
+        install_args_list.append(
+            {
+                "name": name,
+                "owner": owner,
+                "tool_shed_url": shed_context.tsi.base_url,
+                "changeset_revision": changeset_revision,
+            }
+        )
 
     return install_args_list
 
@@ -519,11 +533,7 @@ def _find_repository_id(ctx, shed_context, name, repo_config, **kwds):
     owner = _owner(ctx, repo_config, shed_context, **kwds)
     matching_repository = find_repository(shed_context.tsi, owner, name)
     if matching_repository is None:
-        if not kwds.get("allow_none", False):
-            message = "Failed to find repository for owner/name %s/%s"
-            raise Exception(message % (owner, name))
-        else:
-            return None
+        raise Exception(f"Failed to find repository for owner/name {owner}/{name}")
     else:
         repo_id = matching_repository["id"]
         return repo_id
@@ -949,7 +959,7 @@ class RepositoryDependencies:
     def __str__(self):
         contents = '<repositories description="%s">' % self.description
         line_template = '  <repository owner="%s" name="%s" />\n'
-        for (owner, name) in self.repo_pairs:
+        for owner, name in self.repo_pairs:
             contents += line_template % (owner, name)
         contents += "</repositories>"
         return contents
@@ -1007,7 +1017,7 @@ class RawRepositoryDirectory:
                 continue
             realized_file.realize_to(directory)
 
-        for (name, contents) in config.get("_files", {}).items():
+        for name, contents in config.get("_files", {}).items():
             path = os.path.join(directory, name)
             with open(path, "w") as f:
                 f.write(contents)
@@ -1223,7 +1233,6 @@ class RealizedRepositry:
                 shed_context,
                 name=self.name,
                 repo_config=self.config,
-                allow_none=True,
             )
             return repo_id
         except Exception as e:

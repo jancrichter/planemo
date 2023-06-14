@@ -3,7 +3,6 @@
 import contextlib
 import functools
 import os
-import re
 import shutil
 import signal
 import traceback
@@ -23,7 +22,6 @@ from unittest import (
 )
 
 import psutil
-import py.code
 import pytest
 from click.testing import CliRunner
 from galaxy.util import (
@@ -75,7 +73,7 @@ mark = MarkGenerator()
 class CliTestCase(TestCase):
     non_zero_exit_code = NON_ZERO_EXIT_CODE
 
-    def setUp(self):  # noqa
+    def setUp(self) -> None:
         self._runner = CliRunner()
         self._home = mkdtemp()
         self._old_config = os.environ.get(PLANEMO_CONFIG_ENV_PROP, None)
@@ -118,6 +116,12 @@ class CliTestCase(TestCase):
             yield f
 
     @contextlib.contextmanager
+    def _isolate_workflow(self, name):
+        with self._isolate() as f:
+            self._copy_workflow(name, f)
+            yield f
+
+    @contextlib.contextmanager
     def _isolate_with_test_data(self, relative_path):
         with self._isolate() as f:
             repo = os.path.join(TEST_DATA_DIR, relative_path)
@@ -127,6 +131,10 @@ class CliTestCase(TestCase):
     def _copy_repo(self, name, dest):
         repo = os.path.join(TEST_REPOS_DIR, name)
         self._copy_directory(repo, dest)
+
+    def _copy_workflow(self, name, dest):
+        workflow = os.path.join(TEST_DATA_DIR, name)
+        io.shell(["cp", workflow, dest])
 
     def _copy_directory(self, path, dest):
         io.shell(["cp", "-r", f"{path}/.", dest])
@@ -405,39 +413,6 @@ def _wait_on_future_suppress_exception(future):
         future.result(timeout=30)
     except Exception as e:
         print(f"Problem waiting on future {e}")
-
-
-# From pytest-raisesregexp
-class assert_raises_regexp:
-    def __init__(self, expected_exception, regexp, *args, **kwargs):
-        __tracebackhide__ = True
-        self.exception = expected_exception
-        self.regexp = regexp
-        self.excinfo = None
-
-        if args:
-            with self:
-                args[0](*args[1:], **kwargs)
-
-    def __enter__(self):
-        self.excinfo = object.__new__(py.code.ExceptionInfo)
-        return self.excinfo
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        __tracebackhide__ = True
-
-        if exc_type is None:
-            pytest.fail(f"DID NOT RAISE {self.exception}")
-
-        self.excinfo.__init__((exc_type, exc_val, exc_tb))
-
-        if not issubclass(exc_type, self.exception):
-            pytest.fail(f"{exc_type} RAISED instead of {self.exception}\n{exc_val!r}")
-
-        if not re.search(self.regexp, str(exc_val)):
-            pytest.fail(f'Pattern "{self.regexp}" not found in "{exc_val!s}"')
-
-        return True
 
 
 def safe_rmtree(path):

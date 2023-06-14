@@ -10,13 +10,18 @@ from typing import (
     Iterator,
     List,
     Optional,
+    Tuple,
     TYPE_CHECKING,
     Union,
 )
 
+import requests
 import yaml
+from bioblend import toolshed
+from bioblend.toolshed import ToolShedInstance
 from galaxy.tool_util.lint import LintContext
 from galaxy.tool_util.loader_directory import EXCLUDE_WALK_DIRS
+from galaxy.tool_util.parser.yaml import __to_test_assert_list
 from galaxy.tool_util.verify import asserts
 from gxformat2.lint import (
     lint_format2,
@@ -46,6 +51,8 @@ if TYPE_CHECKING:
 POTENTIAL_WORKFLOW_FILES = re.compile(r"^.*(\.yml|\.yaml|\.ga)$")
 DOCKSTORE_REGISTRY_CONF_VERSION = "1.2"
 
+MAIN_TOOLSHED_URL = "https://toolshed.g2.bx.psu.edu"
+
 
 class WorkflowLintContext(LintContext):
     # Setup training topic for linting - probably should pass this through
@@ -55,21 +62,63 @@ class WorkflowLintContext(LintContext):
 
 def generate_dockstore_yaml(directory: str, publish: bool = True) -> str:
     workflows = []
-    for workflow_path in find_workflow_descriptions(directory):
+    all_workflow_paths = list(find_workflow_descriptions(directory))
+    for workflow_path in all_workflow_paths:
         test_parameter_path = f"{workflow_path.rsplit('.', 1)[0]}-tests.yml"
         workflow_entry: Dict[str, Any] = {
             # TODO: support CWL
+            "name": "main" if len(all_workflow_paths) == 1 else os.path.basename(workflow_path).split(".ga")[0],
             "subclass": "Galaxy",
             "publish": publish,
-            "name": "main",
             "primaryDescriptorPath": f"/{os.path.relpath(workflow_path, directory)}",
         }
         if os.path.exists(test_parameter_path):
             workflow_entry["testParameterFiles"] = [f"/{os.path.relpath(test_parameter_path, directory)}"]
+
+        with open(workflow_path) as f:
+            workflow_dict = ordered_load(f)
+
+        # add author
+        if len(workflow_dict.get("creator", [])) > 0:
+            creators = workflow_dict["creator"]
+            authors = []
+            for creator in creators:
+                author = {}
+                # Put name first
+                if "name" in creator:
+                    author["name"] = creator["name"]
+                for field, value in creator.items():
+                    if field in ["class", "name"]:
+                        continue
+                    if field == "identifier":
+                        # Check if it is an orcid:
+                        # Read https://support.orcid.org/hc/en-us/articles/360006897674-Structure-of-the-ORCID-Identifier
+                        orcid = re.findall(r"(?:\d{4}-){3}\d{3}[0-9X]", value)
+                        if len(orcid) > 0:
+                            # Check the orcid is valid
+                            if (
+                                requests.get(
+                                    f"https://orcid.org/{orcid[0]}",
+                                    headers={"Accept": "application/xml"},
+                                    allow_redirects=True,
+                                ).status_code
+                                == 200
+                            ):
+                                author["orcid"] = orcid[0]
+                            else:
+                                # If it is not put as identifier
+                                author["identifier"] = value
+                        else:
+                            author["identifier"] = value
+                    else:
+                        author[field] = value
+                authors.append(author)
+            workflow_entry["authors"] = authors
+
         workflows.append(workflow_entry)
     # Force version to the top of file but serializing rest of config separately
     contents = "version: %s\n" % DOCKSTORE_REGISTRY_CONF_VERSION
-    contents += yaml.dump({"workflows": workflows})
+    contents += yaml.dump({"workflows": workflows}, sort_keys=False)
     return contents
 
 
@@ -106,6 +155,7 @@ def _lint_workflow_artifacts_on_path(
             lint_context.lint("lint_structure", structure, potential_workflow_artifact_path)
             lint_context.lint("lint_best_practices", _lint_best_practices, potential_workflow_artifact_path)
             lint_context.lint("lint_tests", _lint_tsts, potential_workflow_artifact_path)
+            lint_context.lint("lint_tool_ids", _lint_tool_ids, potential_workflow_artifact_path)
         else:
             # Allow linting ro crates and such also
             pass
@@ -113,7 +163,7 @@ def _lint_workflow_artifacts_on_path(
 
 # misspell for pytest
 def _lint_tsts(path: str, lint_context: WorkflowLintContext) -> None:
-    runnables = for_path(path, return_all=True)
+    runnables = for_path(path)
     if not isinstance(runnables, list):
         runnables = [runnables]
     for runnable in runnables:
@@ -239,9 +289,17 @@ def _lint_case(path: str, test_case: TestCase, lint_context: WorkflowLintContext
             found_valid_expectation = True
         # TODO: validate structure of test expectations
 
-        assertion_definitions = test_case.output_expectations[test_output_id].get("asserts")
-        if not _check_test_assertions(lint_context, assertion_definitions):
-            test_valid = False
+        output_expectations = test_case.output_expectations[test_output_id]
+        all_assertion_definitions = []
+        if "element_tests" in output_expectations:
+            # This is a collection
+            for element_id in output_expectations["element_tests"]:
+                all_assertion_definitions.append(output_expectations["element_tests"][element_id].get("asserts"))
+        else:
+            all_assertion_definitions.append(output_expectations.get("asserts"))
+        for assertion_definitions in all_assertion_definitions:
+            if not _check_test_assertions(lint_context, assertion_definitions):
+                test_valid = False
 
     if not found_valid_expectation:
         lint_context.warn("Found no valid test expectations for workflow test")
@@ -257,16 +315,26 @@ def _check_test_assertions(
     # Python functions directly, rather than checking against galaxy.xsd as for tool linting
     assertions_valid = True
     if assertion_definitions:
-        for assertion_name, assertion_params in assertion_definitions.items():
-            function = asserts.assertion_functions[f"assert_{assertion_name}"]
+        # Can be either a dictionary with different assert
+        # Or a list with max of asserts and potentially identical
+        # We transform to list:
+        assertion_definitions_list = __to_test_assert_list(assertion_definitions)
+        for assertion_description in assertion_definitions_list:
+            function = asserts.assertion_functions.get(f"assert_{assertion_description['tag']}")
+            if function is None:
+                lint_context.error(f"Invalid assertion: assert_{assertion_description['tag']} does not exists")
+                assertions_valid = False
+                continue
             signature = inspect.signature(function)
+            assertion_params = assertion_description["attributes"].copy()
+            del assertion_params["that"]
             try:
                 # try mapping the function with the attributes supplied and check for TypeError
                 signature.bind("", **assertion_params)
             except AssertionError:
                 pass
             except TypeError as e:
-                lint_context.error(f"Invalid assertion in tests: assert_{assertion_name} {str(e)}")
+                lint_context.error(f"Invalid assertion in tests: assert_{assertion_description['tag']} {str(e)}")
                 assertions_valid = False
     return assertions_valid
 
@@ -387,3 +455,51 @@ def find_potential_workflow_files(directory: str) -> List[str]:
     else:
         matches.append(directory)
     return matches
+
+
+def find_repos_from_tool_id(tool_id: str, ts: ToolShedInstance) -> Tuple[str, Dict[str, Any]]:
+    """
+    Return a string which indicates what failed and dict with all revisions for a given tool id
+    """
+    if not tool_id.startswith(MAIN_TOOLSHED_URL[8:]):
+        return ("", {})  # assume a built in tool
+    try:
+        repos = ts.repositories._get(params={"tool_ids": tool_id})
+    except Exception:
+        return (f"The ToolShed returned an error when searching for the most recent version of {tool_id}", {})
+    if len(repos) == 0:
+        return (f"The tool {tool_id} is not in the toolshed (may have been tagged as invalid).", {})
+    else:
+        return ("", repos)
+
+
+def _lint_tool_ids(path: str, lint_context: WorkflowLintContext) -> None:
+    def _lint_tool_ids_steps(lint_context: WorkflowLintContext, wf_dict: Dict, ts: ToolShedInstance) -> bool:
+        """Returns whether a single tool_id was invalid"""
+        failed = False
+        steps = wf_dict.get("steps", {})
+        for step in steps.values():
+            if step.get("type", "tool") == "tool" and not step.get("run", {}).get("class") == "GalaxyWorkflow":
+                warning_msg, _ = find_repos_from_tool_id(step["tool_id"], ts)
+                if warning_msg != "":
+                    lint_context.error(warning_msg)
+                    failed = True
+            elif step.get("type") == "subworkflow":  # GA SWF
+                sub_failed = _lint_tool_ids_steps(lint_context, step["subworkflow"], ts)
+                if sub_failed:
+                    failed = True
+            elif step.get("run", {}).get("class") == "GalaxyWorkflow":  # gxformat2 SWF
+                sub_failed = _lint_tool_ids_steps(lint_context, step["run"], ts)
+                if sub_failed:
+                    failed = True
+            else:
+                continue
+        return failed
+
+    with open(path) as f:
+        workflow_dict = ordered_load(f)
+    ts = toolshed.ToolShedInstance(url=MAIN_TOOLSHED_URL)
+    failed = _lint_tool_ids_steps(lint_context, workflow_dict, ts)
+    if not failed:
+        lint_context.valid("All tools_id appear to be valid.")
+    return None

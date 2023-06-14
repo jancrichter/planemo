@@ -164,7 +164,7 @@ def galaxy_python_version():
         "--galaxy_python_version",
         use_global_config=True,
         default=None,
-        type=click.Choice(["3", "3.7", "3.8", "3.9"]),
+        type=click.Choice(["3", "3.7", "3.8", "3.9", "3.10", "3.11"]),
         help="Python version to start Galaxy under",
     )
 
@@ -463,7 +463,8 @@ def docker_extra_volume_option():
         type=arg_type,
         default=None,
         use_global_config=True,
-        help=("Extra path to mount if --engine docker."),
+        multiple=True,
+        help=("Extra path to mount if --engine docker or `--biocontainers` or `--docker`."),
     )
 
 
@@ -1353,6 +1354,17 @@ def shed_fail_fast_option():
 def lint_xsd_option():
     return planemo_option(
         "--xsd/--no_xsd", is_flag=True, default=True, help=("Include tool XSD validation in linting process.")
+    )
+
+
+def lint_biocontainers_option():
+    return planemo_option(
+        "biocontainer",
+        "--biocontainer",
+        "--biocontainers",
+        is_flag=True,
+        default=False,
+        help="Check best practice BioContainer namespaces for a container definition applicable for this tool.",
     )
 
 

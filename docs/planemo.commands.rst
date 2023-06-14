@@ -28,6 +28,14 @@ planemo.commands.cmd\_ci\_find\_tools module
    :undoc-members:
    :show-inheritance:
 
+planemo.commands.cmd\_ci\_setup module
+--------------------------------------
+
+.. automodule:: planemo.commands.cmd_ci_setup
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 planemo.commands.cmd\_clone module
 ----------------------------------
 
@@ -284,6 +292,14 @@ planemo.commands.cmd\_pull\_request module
    :undoc-members:
    :show-inheritance:
 
+planemo.commands.cmd\_rerun module
+----------------------------------
+
+.. automodule:: planemo.commands.cmd_rerun
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 planemo.commands.cmd\_run module
 --------------------------------
 
@@ -499,7 +515,6 @@ planemo.commands.cmd\_workflow\_upload module
    :members:
    :undoc-members:
    :show-inheritance:
-
 
 Module contents
 ---------------

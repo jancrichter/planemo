@@ -7,6 +7,7 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Optional,
     Tuple,
     TYPE_CHECKING,
     Union,
@@ -47,7 +48,7 @@ def uris_to_paths(ctx, uris):
 
 
 def yield_tool_sources_on_paths(
-    ctx: "PlanemoCliContext",
+    ctx: Optional["PlanemoCliContext"],
     paths: Iterable[str],
     recursive: bool = False,
     yield_load_errors: bool = True,
@@ -55,14 +56,14 @@ def yield_tool_sources_on_paths(
 ) -> Iterator[Tuple[str, Union[ToolSource, object]]]:
     """Walk paths and yield ToolSource objects discovered."""
     for path in paths:
-        for (tool_path, tool_source) in yield_tool_sources(ctx, path, recursive, yield_load_errors):
+        for tool_path, tool_source in yield_tool_sources(ctx, path, recursive, yield_load_errors):
             if exclude_deprecated and "deprecated" in tool_path:
                 continue
             yield (tool_path, tool_source)
 
 
 def yield_tool_sources(
-    ctx: "PlanemoCliContext", path: str, recursive: bool = False, yield_load_errors: bool = True
+    ctx: Optional["PlanemoCliContext"], path: str, recursive: bool = False, yield_load_errors: bool = True
 ) -> Iterator[Tuple[str, Union[ToolSource, object]]]:
     """Walk single path and yield ToolSource objects discovered."""
     tools = load_tool_sources_from_path(
@@ -70,7 +71,7 @@ def yield_tool_sources(
         recursive,
         register_load_errors=True,
     )
-    for (tool_path, tool_source) in tools:
+    for tool_path, tool_source in tools:
         if is_tool_load_error(tool_source):
             if yield_load_errors:
                 yield (tool_path, tool_source)
@@ -100,13 +101,13 @@ def _load_exception_handler(path, exc_info):
     traceback.print_exception(*exc_info, limit=1, file=sys.stderr)
 
 
-def _is_tool_source(ctx: "PlanemoCliContext", tool_path: str, tool_source: "ToolSource") -> bool:
+def _is_tool_source(ctx: Optional["PlanemoCliContext"], tool_path: str, tool_source: "ToolSource") -> bool:
     if os.path.basename(tool_path) in SHED_FILES:
         return False
     root = getattr(tool_source, "root", None)
     if root is not None:
         if root.tag != "tool":
-            if ctx.verbose:
+            if ctx and ctx.verbose:
                 info(SKIP_XML_MESSAGE % tool_path)
             return False
     return True

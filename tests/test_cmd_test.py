@@ -1,7 +1,11 @@
 """Module contains :class:`CmdTestTestCase` - integration tests for the ``test`` command."""
 import json
 import os
-from tempfile import NamedTemporaryFile
+import shutil
+from tempfile import (
+    NamedTemporaryFile,
+    TemporaryDirectory,
+)
 
 from .test_utils import (
     assert_exists,
@@ -14,7 +18,10 @@ from .test_utils import (
     TEST_TOOLS_DIR,
 )
 
-DATA_MANAGER_TEST_PATH = "data_manager/data_manager_fetch_genome_dbkeys_all_fasta/data_manager/data_manager_fetch_genome_all_fasta_dbkeys.xml"
+FETCH_DATA_DATA_MANAGER_TEST_PATH = "data_manager/data_manager_fetch_genome_dbkeys_all_fasta/data_manager/data_manager_fetch_genome_all_fasta_dbkeys.xml"
+BOWTIE2_DATA_MANAGER_TEST_PATH = (
+    "data_manager/data_manager_bowtie2_index_builder/data_manager/bowtie2_index_builder.xml"
+)
 
 
 class CmdTestTestCase(CliTestCase):
@@ -24,21 +31,53 @@ class CmdTestTestCase(CliTestCase):
     def test_startup_timeout(self):
         """Test --galaxy_startup_timeout."""
         with self._isolate():
-            test_artifact = os.path.join(TEST_DATA_DIR, DATA_MANAGER_TEST_PATH)
+            test_artifact = os.path.join(TEST_DATA_DIR, FETCH_DATA_DATA_MANAGER_TEST_PATH)
             test_command = self._test_command(
                 "--galaxy_startup_timeout", "1", test_artifact, "--no_dependency_resolution"
             )
             self._check_exit_code(test_command, exit_code=1)
 
     @skip_if_environ("PLANEMO_SKIP_GALAXY_TESTS")
+    def test_tool_in_directory(self):
+        """Test with (single) tool in directory."""
+        with self._isolate(), TemporaryDirectory() as tempdir:
+            test_artifact = os.path.join(TEST_DATA_DIR, "tools", "ok_test_assert_command.xml")
+            shutil.copy(test_artifact, tempdir)
+            test_command = self._test_command(tempdir, "--no_dependency_resolution")
+            self._check_exit_code(test_command, exit_code=0)
+
+    @skip_if_environ("PLANEMO_SKIP_GALAXY_TESTS")
     def test_data_manager(self):
         """Test testing a data manager test."""
         with self._isolate(), NamedTemporaryFile(prefix="data_manager_test_json") as json_out:
-            test_artifact = os.path.join(TEST_DATA_DIR, DATA_MANAGER_TEST_PATH)
+            test_artifact = os.path.join(TEST_DATA_DIR, FETCH_DATA_DATA_MANAGER_TEST_PATH)
             test_command = self._test_command("--test_output_json", json_out.name)
             test_command = self.append_profile_argument_if_needed(test_command)
             test_command += [
                 "--no_dependency_resolution",
+                test_artifact,
+            ]
+            self._check_exit_code(test_command, exit_code=0)
+            with open(json_out.name) as fh:
+                assert json.load(fh)["summary"]["num_tests"] == 1
+
+    @skip_if_environ("PLANEMO_SKIP_GALAXY_TESTS")
+    def test_data_manager_docker_mount(self):
+        """Test testing a data manager that needs (ro) access to the test-data folder."""
+        with self._isolate(), NamedTemporaryFile(prefix="data_manager_test_json") as json_out:
+            test_artifact = os.path.join(TEST_DATA_DIR, BOWTIE2_DATA_MANAGER_TEST_PATH)
+            test_command = self._test_command("--test_output_json", json_out.name)
+            test_command = self.append_profile_argument_if_needed(test_command)
+            # data manager script is symlinked out of directory, will only work with `--docker_extra_volume`
+            # we'll also add a bunch more to test multi path handling
+            extra_volume = os.path.join(TEST_DATA_DIR, "data_manager")
+            test_command += [
+                "--no_dependency_resolution",
+                "--biocontainers",
+                "--docker_extra_volume",
+                extra_volume,
+                "--docker_extra_volume",
+                extra_volume,
                 test_artifact,
             ]
             self._check_exit_code(test_command, exit_code=0)
@@ -306,6 +345,16 @@ class CmdTestTestCase(CliTestCase):
         with self._isolate():
             test_artifact = os.path.join(TEST_DATA_DIR, "wf16_optional_input_output_label.ga")
             test_command = self._test_command()
+            test_command = self.append_profile_argument_if_needed(test_command)
+            test_command.append(test_artifact)
+            self._check_exit_code(test_command, exit_code=0)
+
+    @skip_if_environ("PLANEMO_SKIP_GALAXY_TESTS")
+    def test_workflow_test_output_sanitization(self):
+        cat = os.path.join(PROJECT_TEMPLATES_DIR, "demo", "cat.xml")
+        with self._isolate():
+            test_artifact = os.path.join(TEST_DATA_DIR, "wf17_sanitize_output_paths.yml")
+            test_command = self._test_command("--extra_tools", cat)
             test_command = self.append_profile_argument_if_needed(test_command)
             test_command.append(test_artifact)
             self._check_exit_code(test_command, exit_code=0)

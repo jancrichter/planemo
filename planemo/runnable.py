@@ -3,7 +3,6 @@
 
 import abc
 import os
-from distutils.dir_util import copy_tree
 from enum import (
     auto,
     Enum,
@@ -16,7 +15,6 @@ from typing import (
     List,
     NamedTuple,
     Optional,
-    overload,
     Union,
 )
 from urllib.parse import urlparse
@@ -32,7 +30,6 @@ from galaxy.tool_util.loader_directory import (
     looks_like_a_tool_xml,
 )
 from galaxy.tool_util.parser import get_tool_source
-from typing_extensions import Literal
 
 from planemo.exit_codes import (
     EXIT_CODE_UNKNOWN_FILE_TYPE,
@@ -49,6 +46,7 @@ from planemo.test import (
     check_output,
     for_collections,
 )
+from planemo.tools import yield_tool_sources_on_paths
 
 TEST_SUFFIXES = ["-tests", "_tests", "-test", "_test"]
 TEST_EXTENSIONS = [".yml", ".yaml", ".json"]
@@ -168,23 +166,6 @@ def _runnable_delegate_attribute(attribute: str) -> property:
     return property(getter)
 
 
-def _copy_runnable_tree(path: str, runnable_type: RunnableType, temp_path: str) -> str:
-    dir_to_copy = None
-    if runnable_type in {RunnableType.galaxy_tool, RunnableType.cwl_tool}:
-        dir_to_copy = os.path.dirname(path)
-        path = os.path.join(temp_path, os.path.basename(path))
-    elif runnable_type == RunnableType.directory:
-        dir_to_copy = path
-        path = temp_path
-    elif runnable_type == RunnableType.galaxy_datamanager:
-        dir_to_copy = os.path.join(os.path.dirname(path), os.pardir)
-        path_to_data_manager_tool = os.path.relpath(path, dir_to_copy)
-        path = os.path.join(temp_path, path_to_data_manager_tool)
-    if dir_to_copy:
-        copy_tree(dir_to_copy, temp_path, update=True)
-    return path
-
-
 def workflows_from_dockstore_yaml(path):
     workflows = []
     parent_dir = Path(path).absolute().parent
@@ -198,34 +179,24 @@ def workflows_from_dockstore_yaml(path):
     return workflows
 
 
-def workflow_dir_runnables(path: str, return_all: bool = False) -> Optional[Union[Runnable, List[Runnable]]]:
+def workflow_dir_runnables(path: str) -> List[Runnable]:
     dockstore_path = os.path.join(path, DOCKSTORE_REGISTRY_CONF)
     if os.path.exists(dockstore_path):
-        runnables = [
+        return [
             Runnable(str(path), RunnableType.galaxy_workflow) for path in workflows_from_dockstore_yaml(dockstore_path)
         ]
-        if return_all:
-            return runnables
-        else:
-            return runnables[0]
-    return None
+    return []
 
 
-@overload
-def for_path(path: str, temp_path: Optional[str] = None, return_all: Literal[False] = False) -> Runnable:
-    ...
+def tool_dir_runnables(path: str) -> List[Runnable]:
+    return for_paths(tool_path for tool_path, _ in yield_tool_sources_on_paths(ctx=None, paths=[path]))
 
 
-@overload
-def for_path(path: str, temp_path: Optional[str] = None, return_all: bool = False) -> Union[Runnable, List[Runnable]]:
-    pass
-
-
-def for_path(path: str, temp_path: Optional[str] = None, return_all: bool = False) -> Union[Runnable, List[Runnable]]:
+def for_path(path: str) -> Union[Runnable, List[Runnable]]:
     """Produce a class:`Runnable` for supplied path."""
     runnable_type = None
     if os.path.isdir(path):
-        runnable = workflow_dir_runnables(path, return_all=return_all)
+        runnable = workflow_dir_runnables(path) or tool_dir_runnables(path)
         if runnable:
             return runnable
         runnable_type = RunnableType.directory
@@ -255,15 +226,19 @@ def for_path(path: str, temp_path: Optional[str] = None, return_all: bool = Fals
         error(f"Unable to determine runnable type for path [{path}]")
         raise ExitCodeException(EXIT_CODE_UNKNOWN_FILE_TYPE)
 
-    if temp_path:
-        path = _copy_runnable_tree(path, runnable_type, temp_path)
-
     return Runnable(path, runnable_type)
 
 
-def for_paths(paths: Iterable[str], temp_path: Optional[str] = None) -> List[Runnable]:
+def for_paths(paths: Iterable[str]) -> List[Runnable]:
     """Return a specialized list of Runnable objects for paths."""
-    return [for_path(path, temp_path=temp_path) for path in paths]
+    runnables = []
+    for path in paths:
+        runnables_for_path = for_path(path)
+        if isinstance(runnables_for_path, list):
+            runnables.extend(runnables_for_path)
+        else:
+            runnables.append(runnables_for_path)
+    return runnables
 
 
 def for_uri(uri: str) -> Runnable:
@@ -396,7 +371,7 @@ class TestCase(AbstractTestCase):
     def _job(self):
         if self.job_path is not None:
             with open(self.job_path) as f:
-                return f.read()
+                return yaml.safe_load(f)
         else:
             return self.job
 
@@ -593,7 +568,7 @@ class RunResponse(metaclass=abc.ABCMeta):
         return None
 
     @abc.abstractproperty
-    def was_successful(self):
+    def was_successful(self) -> bool:
         """Indicate whether an error was encountered while executing this runnable.
 
         If successful, response should conform to the SuccessfulRunResponse interface,
@@ -676,6 +651,7 @@ class SuccessfulRunResponse(RunResponse, metaclass=abc.ABCMeta):
     def __init__(self, runnable: "Runnable") -> None:
         self._runnable = runnable
 
+    @property
     def was_successful(self):
         """Return `True` to indicate this run was successful."""
         return True
